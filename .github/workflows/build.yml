@@ -12,7 +12,7 @@ on:
       - '.github/workflows/build.yml'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -108,6 +108,17 @@ jobs:
             }
           done
 
+          echo "===== DAE standalone mode check ====="
+
+          for p in dae luci-app-dae; do
+            if grep -q "^CONFIG_PACKAGE_${p}=y$" .config; then
+              echo "ERROR: ${p} must be installed separately"
+              exit 1
+            fi
+          done
+
+          echo "OK: DAE will be installed separately"
+
       # 6. Download source packages
       - name: Download sources
         run: |
@@ -122,8 +133,9 @@ jobs:
 
           make -j"$(nproc)" || make -j1 V=s
 
-      # 8. Verify output and generate checksums
+      # 8. Verify firmware and prepare release files
       - name: Verify firmware
+        shell: bash
         run: |
           cd openwrt/bin/targets/mediatek/filogic
 
@@ -132,42 +144,74 @@ jobs:
 
           echo "===== Required artifacts ====="
 
-          for f in \
-            *ubootmod-preloader.bin \
-            *ubootmod-bl31-uboot.fip \
-            *ubootmod-initramfs-factory.ubi \
-            *ubootmod-initramfs-recovery.itb \
-            *ubootmod-squashfs-sysupgrade.itb
+          for pattern in \
+            '*ubootmod-preloader.bin' \
+            '*ubootmod-bl31-uboot.fip' \
+            '*ubootmod-initramfs-factory.ubi' \
+            '*ubootmod-initramfs-recovery.itb' \
+            '*ubootmod-squashfs-sysupgrade.itb'
           do
-            test -f "$f" || {
-              echo "Missing artifact: $f"
+            if ! compgen -G "$pattern" > /dev/null; then
+              echo "ERROR: Missing artifact: $pattern"
               exit 1
-            }
-            echo "OK: $f"
+            fi
+
+            echo "OK: $pattern"
           done
+
+          echo "===== Prepare release directory ====="
+
+          mkdir -p "$GITHUB_WORKSPACE/release-assets"
+
+          cp *xiaomi_redmi-router-ax6000-ubootmod* \
+            "$GITHUB_WORKSPACE/release-assets/"
+
+          cp config.buildinfo \
+             feeds.buildinfo \
+             version.buildinfo \
+             profiles.json \
+             "$GITHUB_WORKSPACE/release-assets/"
+
+          cd "$GITHUB_WORKSPACE/release-assets"
 
           echo "===== Generate SHA256 ====="
 
-          find . -maxdepth 1 -type f \
-            ! -name sha256sums.txt \
-            -print0 \
-            | sort -z \
-            | xargs -0 -r sha256sum > sha256sums.txt
+          sha256sum *ubootmod* > sha256sums.txt
+
+          echo "===== Release files ====="
+          ls -lh
 
           echo "===== SHA256 ====="
           cat sha256sums.txt
 
-      # 9. Upload firmware
-      - name: Upload firmware
+      # 9. Generate unique release tag
+      - name: Generate release metadata
+        id: release_meta
+        run: |
+          TAG="ax6000-ubootmod-${OPENWRT_TAG}-build-${GITHUB_RUN_NUMBER}"
+
+          echo "tag_name=$TAG" >> "$GITHUB_OUTPUT"
+
+          echo "Release tag: $TAG"
+
+      # 10. Upload Actions artifact
+      - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
           name: Redmi-AX6000-U-Boot-Mod
-          path: |
-            openwrt/bin/targets/mediatek/filogic/*xiaomi_redmi-router-ax6000-ubootmod*
-            openwrt/bin/targets/mediatek/filogic/sha256sums.txt
-            openwrt/bin/targets/mediatek/filogic/config.buildinfo
-            openwrt/bin/targets/mediatek/filogic/feeds.buildinfo
-            openwrt/bin/targets/mediatek/filogic/version.buildinfo
-            openwrt/bin/targets/mediatek/filogic/profiles.json
+          path: release-assets/*
           if-no-files-found: error
           retention-days: 30
+
+      # 11. Create GitHub Release
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.release_meta.outputs.tag_name }}
+          name: Redmi AX6000 U-Boot Mod - OpenWrt ${{ env.OPENWRT_TAG }} - Build ${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          prerelease: true
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            release-assets/*
