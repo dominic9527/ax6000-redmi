@@ -1,5 +1,4 @@
-
-name: Redmi AX6000 U-Boot Mod Build
+name: Redmi AX6000 OpenWrt Build
 
 on:
   workflow_dispatch:
@@ -8,29 +7,38 @@ on:
     branches:
       - main
     paths:
-      - '.config'
+      - 'ax6000.config'
+      - 'diy-part1.sh'
+      - 'diy-part2.sh'
       - '.github/workflows/build.yml'
 
 permissions:
   contents: write
 
-jobs:
-  build:
-    name: AX6000 U-Boot Mod
-    runs-on: ubuntu-24.04
-    timeout-minutes: 360
+env:
+  OPENWRT_REPO: https://github.com/openwrt/openwrt.git
+  OPENWRT_TAG: v25.12.6
 
-    env:
-      OPENWRT_TAG: v25.12.6
+jobs:
+
+  build:
+
+    runs-on: ubuntu-24.04
 
     steps:
 
-      # 1. Get your configuration repository
-      - name: Checkout config
+      # ---------------------------------------------------
+      # 1. Checkout configuration repository
+      # ---------------------------------------------------
+
+      - name: Checkout configuration
         uses: actions/checkout@v4
 
-      # 2. Install dependencies
-      - name: Install build dependencies
+      # ---------------------------------------------------
+      # 2. Install build dependencies
+      # ---------------------------------------------------
+
+      - name: Install dependencies
         run: |
           sudo apt-get update
 
@@ -49,169 +57,238 @@ jobs:
             libssl-dev \
             python3 \
             python3-setuptools \
+            python3-pyelftools \
             rsync \
+            swig \
             unzip \
             zlib1g-dev \
             file \
             wget \
             curl \
-            ccache
+            jq \
+            time
 
-      # 3. Clone official OpenWrt source
+      # ---------------------------------------------------
+      # 3. Clone official OpenWrt
+      # ---------------------------------------------------
+
       - name: Clone OpenWrt
         run: |
           git clone \
             --depth 1 \
-            --branch "$OPENWRT_TAG" \
-            https://github.com/openwrt/openwrt.git \
+            --branch "${OPENWRT_TAG}" \
+            "${OPENWRT_REPO}" \
             openwrt
 
-      # 4. Update package feeds
-      - name: Update feeds
-        run: |
-          cd openwrt
+      # ---------------------------------------------------
+      # 4. Update and install feeds
+      # ---------------------------------------------------
 
+      - name: Update feeds
+        working-directory: openwrt
+        run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      # 5. Load configuration
-      - name: Configure firmware
+      # ---------------------------------------------------
+      # 5. Run DIY Part 1
+      # ---------------------------------------------------
+
+      - name: Run DIY Part 1
+        working-directory: openwrt
         run: |
-          cp .config openwrt/.config
+          chmod +x "$GITHUB_WORKSPACE/diy-part1.sh"
+          "$GITHUB_WORKSPACE/diy-part1.sh"
 
-          cd openwrt
+      # ---------------------------------------------------
+      # 6. Load configuration and run DIY Part 2
+      # ---------------------------------------------------
 
+      - name: Load configuration
+        working-directory: openwrt
+        run: |
+          cp "$GITHUB_WORKSPACE/ax6000.config" .config
+
+          chmod +x "$GITHUB_WORKSPACE/diy-part2.sh"
+          "$GITHUB_WORKSPACE/diy-part2.sh"
+
+      # ---------------------------------------------------
+      # 7. Generate final configuration
+      # ---------------------------------------------------
+
+      - name: Generate defconfig
+        working-directory: openwrt
+        run: |
           make defconfig
 
-          echo "===== Target check ====="
+          echo "========== Target check =========="
 
           grep -E \
-            '^CONFIG_TARGET_mediatek_filogic_DEVICE_xiaomi_redmi-router-ax6000-ubootmod=y$' \
+            'CONFIG_TARGET_mediatek_filogic_DEVICE_xiaomi_redmi-router-ax6000-ubootmod=y' \
             .config
 
-          echo "===== Initramfs check ====="
+          echo "========== Package check =========="
 
-          grep '^CONFIG_TARGET_ROOTFS_INITRAMFS=y$' .config
-
-          echo "===== Important packages ====="
-
-          for p in \
+          for package in \
             luci \
-            tailscale \
+            luci-ssl \
+            kmod-wireguard \
             wireguard-tools \
-            tcpdump \
-            ethtool
+            tailscale \
+            miniupnpd-nftables \
+            lucky \
+            luci-app-lucky \
+            luci-theme-argon
           do
-            grep -E "^CONFIG_PACKAGE_${p}=y$" .config || {
-              echo "Missing package: $p"
-              exit 1
-            }
-          done
-
-          echo "===== DAE standalone mode check ====="
-
-          for p in dae luci-app-dae; do
-            if grep -q "^CONFIG_PACKAGE_${p}=y$" .config; then
-              echo "ERROR: ${p} must be installed separately"
+            if ! grep -q "^CONFIG_PACKAGE_${package}=y" .config; then
+              echo "ERROR: Package not selected: ${package}"
               exit 1
             fi
           done
 
-          echo "OK: DAE will be installed separately"
+          echo "All required packages selected."
 
-      # 6. Download source packages
+          echo "========== DAE check =========="
+
+          if grep -q '^CONFIG_PACKAGE_dae=y' .config; then
+            echo "ERROR: DAE should be installed independently."
+            exit 1
+          fi
+
+          echo "DAE is not built into firmware."
+
+      # ---------------------------------------------------
+      # 8. Download sources
+      # ---------------------------------------------------
+
       - name: Download sources
+        working-directory: openwrt
         run: |
-          cd openwrt
-
           make download -j8
 
-      # 7. Compile
-      - name: Compile firmware
+      # ---------------------------------------------------
+      # 9. Compile firmware
+      # ---------------------------------------------------
+
+      - name: Build firmware
+        working-directory: openwrt
         run: |
-          cd openwrt
+          make -j"$(nproc)" V=s
 
-          make -j"$(nproc)" || make -j1 V=s
+      # ---------------------------------------------------
+      # 10. Collect firmware
+      # ---------------------------------------------------
 
-      # 8. Verify firmware and prepare release files
-      - name: Verify firmware
-        shell: bash
+      - name: Collect firmware
         run: |
-          cd openwrt/bin/targets/mediatek/filogic
+          mkdir -p release
 
-          echo "===== All firmware files ====="
-          ls -lh
+          find openwrt/bin/targets/mediatek/filogic \
+            -type f \
+            \( \
+              -name '*ubootmod-preloader.bin' \
+              -o -name '*ubootmod-bl31-uboot.fip' \
+              -o -name '*ubootmod-initramfs-factory.ubi' \
+              -o -name '*ubootmod-initramfs-recovery.itb' \
+              -o -name '*ubootmod-squashfs-sysupgrade.itb' \
+            \) \
+            -exec cp -v {} release/ \;
 
-          echo "===== Required artifacts ====="
+          echo "========== Collected files =========="
 
-          for pattern in \
-            '*ubootmod-preloader.bin' \
-            '*ubootmod-bl31-uboot.fip' \
-            '*ubootmod-initramfs-factory.ubi' \
-            '*ubootmod-initramfs-recovery.itb' \
+          ls -lh release
+
+          # Check all required artifacts
+
+          required_files=(
+            '*ubootmod-preloader.bin'
+            '*ubootmod-bl31-uboot.fip'
+            '*ubootmod-initramfs-factory.ubi'
+            '*ubootmod-initramfs-recovery.itb'
             '*ubootmod-squashfs-sysupgrade.itb'
-          do
-            if ! compgen -G "$pattern" > /dev/null; then
-              echo "ERROR: Missing artifact: $pattern"
+          )
+
+          for pattern in "${required_files[@]}"; do
+            if ! compgen -G "release/${pattern}" > /dev/null; then
+              echo "ERROR: Missing artifact: ${pattern}"
               exit 1
             fi
-
-            echo "OK: $pattern"
           done
 
-          echo "===== Prepare release directory ====="
+          echo "All required firmware artifacts found."
 
-          mkdir -p "$GITHUB_WORKSPACE/release-assets"
+      # ---------------------------------------------------
+      # 11. Build information and SHA256
+      # ---------------------------------------------------
 
-          cp *xiaomi_redmi-router-ax6000-ubootmod* \
-            "$GITHUB_WORKSPACE/release-assets/"
-
-          cp config.buildinfo \
-             feeds.buildinfo \
-             version.buildinfo \
-             profiles.json \
-             "$GITHUB_WORKSPACE/release-assets/"
-
-          cd "$GITHUB_WORKSPACE/release-assets"
-
-          echo "===== Generate SHA256 ====="
-
-          sha256sum *ubootmod* > sha256sums.txt
-
-          echo "===== Release files ====="
-          ls -lh
-
-          echo "===== SHA256 ====="
-          cat sha256sums.txt
-
-      # 9. Generate unique release tag
-      - name: Generate release metadata
-        id: release_meta
+      - name: Generate build information
         run: |
-          TAG="ax6000-ubootmod-${OPENWRT_TAG}-build-${GITHUB_RUN_NUMBER}"
+          {
+            echo "Device: Redmi AX6000 U-Boot Mod"
+            echo "Target: mediatek/filogic"
+            echo "Source: OpenWrt"
+            echo "Version: ${OPENWRT_TAG}"
+            echo "Build date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo ""
+            echo "Packages:"
+            grep '^CONFIG_PACKAGE_.*=y' openwrt/.config | sort
+          } > release/BUILD_INFO.txt
 
-          echo "tag_name=$TAG" >> "$GITHUB_OUTPUT"
+          cd release
 
-          echo "Release tag: $TAG"
+          sha256sum * > SHA256SUMS
 
-      # 10. Upload Actions artifact
-      - name: Upload firmware artifact
+          cat SHA256SUMS
+
+      # ---------------------------------------------------
+      # 12. Upload artifact
+      # ---------------------------------------------------
+
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Redmi-AX6000-U-Boot-Mod
-          path: release-assets/*
+          name: Redmi-AX6000-OpenWrt-${{ env.OPENWRT_TAG }}
+          path: release/*
           if-no-files-found: error
           retention-days: 30
 
-      # 11. Create GitHub Release
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v3
+      # ---------------------------------------------------
+      # 13. Create GitHub Release
+      # ---------------------------------------------------
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.release_meta.outputs.tag_name }}
-          name: Redmi AX6000 U-Boot Mod - OpenWrt ${{ env.OPENWRT_TAG }} - Build ${{ github.run_number }}
-          target_commitish: ${{ github.sha }}
-          prerelease: true
-          generate_release_notes: true
+          tag_name: AX6000-${{ env.OPENWRT_TAG }}-${{ github.run_number }}
+          name: Redmi AX6000 OpenWrt ${{ env.OPENWRT_TAG }} Build ${{ github.run_number }}
+          body: |
+            ## Redmi AX6000 U-Boot Mod
+
+            - Firmware: Official OpenWrt
+            - Version: ${{ env.OPENWRT_TAG }}
+            - Target: MediaTek Filogic
+            - Device: Xiaomi Redmi Router AX6000 U-Boot Mod
+
+            ### Included
+
+            - WireGuard
+            - Tailscale
+            - UPnP
+            - Lucky
+            - Argon Theme
+            - Chinese LuCI
+
+            ### Independent installation
+
+            DAE is not compiled into the firmware.
+            It is maintained and updated independently.
+
+            ### Notes
+
+            PPPoE credentials and Wi-Fi passwords are not preconfigured.
+            Root password must be configured after installation.
+
+          files: release/*
           fail_on_unmatched_files: true
-          files: |
-            release-assets/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
