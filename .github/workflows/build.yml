@@ -20,25 +20,21 @@ env:
   OPENWRT_TAG: v25.12.6
 
 jobs:
-
   build:
-
+    name: Build Redmi AX6000 Firmware
     runs-on: ubuntu-24.04
 
     steps:
-
-      # ---------------------------------------------------
-      # 1. Checkout configuration repository
-      # ---------------------------------------------------
-
-      - name: Checkout configuration
+      # =====================================================
+      # 1. Checkout 当前配置仓库
+      # =====================================================
+      - name: Checkout Configuration Repository
         uses: actions/checkout@v4
 
-      # ---------------------------------------------------
-      # 2. Install build dependencies
-      # ---------------------------------------------------
-
-      - name: Install dependencies
+      # =====================================================
+      # 2. 安装编译依赖
+      # =====================================================
+      - name: Install Build Dependencies
         run: |
           sudo apt-get update
 
@@ -58,6 +54,7 @@ jobs:
             python3 \
             python3-setuptools \
             python3-pyelftools \
+            python3-yaml \
             rsync \
             swig \
             unzip \
@@ -66,13 +63,13 @@ jobs:
             wget \
             curl \
             jq \
-            time
+            time \
+            ccache
 
-      # ---------------------------------------------------
-      # 3. Clone official OpenWrt
-      # ---------------------------------------------------
-
-      - name: Clone OpenWrt
+      # =====================================================
+      # 3. 下载官方 OpenWrt 源码
+      # =====================================================
+      - name: Clone OpenWrt Source
         run: |
           git clone \
             --depth 1 \
@@ -80,111 +77,169 @@ jobs:
             "${OPENWRT_REPO}" \
             openwrt
 
-      # ---------------------------------------------------
-      # 4. Update and install feeds
-      # ---------------------------------------------------
+          cd openwrt
 
-      - name: Update feeds
-        working-directory: openwrt
+          echo "===== OpenWrt Version ====="
+          git describe --tags --always
+
+      # =====================================================
+      # 4. 添加第三方软件包
+      # =====================================================
+      - name: Apply DIY Part 1
         run: |
+          chmod +x diy-part1.sh
+          cd openwrt
+          ../diy-part1.sh
+
+      # =====================================================
+      # 5. 更新并安装 Feeds
+      # =====================================================
+      - name: Update and Install Feeds
+        run: |
+          cd openwrt
+
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      # ---------------------------------------------------
-      # 5. Run DIY Part 1
-      # ---------------------------------------------------
-
-      - name: Run DIY Part 1
-        working-directory: openwrt
+      # =====================================================
+      # 6. 导入固件配置
+      # =====================================================
+      - name: Apply Firmware Configuration
         run: |
-          chmod +x "$GITHUB_WORKSPACE/diy-part1.sh"
-          "$GITHUB_WORKSPACE/diy-part1.sh"
+          cd openwrt
 
-      # ---------------------------------------------------
-      # 6. Load configuration and run DIY Part 2
-      # ---------------------------------------------------
+          cp ../ax6000.config .config
 
-      - name: Load configuration
-        working-directory: openwrt
+          chmod +x ../diy-part2.sh
+          ../diy-part2.sh
+
+      # =====================================================
+      # 7. 生成最终配置
+      # =====================================================
+      - name: Generate Final Configuration
         run: |
-          cp "$GITHUB_WORKSPACE/ax6000.config" .config
+          cd openwrt
 
-          chmod +x "$GITHUB_WORKSPACE/diy-part2.sh"
-          "$GITHUB_WORKSPACE/diy-part2.sh"
-
-      # ---------------------------------------------------
-      # 7. Generate final configuration
-      # ---------------------------------------------------
-
-      - name: Generate defconfig
-        working-directory: openwrt
-        run: |
           make defconfig
 
-          echo "========== Target check =========="
+          echo "===== Target Configuration ====="
+          grep -E '^CONFIG_TARGET_(mediatek|mediatek_filogic|mediatek_filogic_DEVICE_xiaomi_redmi-router-ax6000-ubootmod)=y$' .config
 
-          grep -E \
-            'CONFIG_TARGET_mediatek_filogic_DEVICE_xiaomi_redmi-router-ax6000-ubootmod=y' \
-            .config
+      # =====================================================
+      # 8. 检查关键配置
+      # =====================================================
+      - name: Verify Firmware Configuration
+        run: |
+          cd openwrt
 
-          echo "========== Package check =========="
+          set -e
 
-          for package in \
-            luci \
-            luci-ssl \
-            kmod-wireguard \
-            wireguard-tools \
-            tailscale \
-            miniupnpd-nftables \
-            lucky \
-            luci-app-lucky \
+          echo "===== Checking Target ====="
+
+          grep -q '^CONFIG_TARGET_mediatek=y$' .config
+          grep -q '^CONFIG_TARGET_mediatek_filogic=y$' .config
+          grep -q '^CONFIG_TARGET_mediatek_filogic_DEVICE_xiaomi_redmi-router-ax6000-ubootmod=y$' .config
+
+          echo "Target configuration OK."
+
+          echo "===== Checking Required Packages ====="
+
+          REQUIRED_PACKAGES=(
+            luci
+            luci-ssl
+            luci-i18n-base-zh-cn
             luci-theme-argon
-          do
-            if ! grep -q "^CONFIG_PACKAGE_${package}=y" .config; then
-              echo "ERROR: Package not selected: ${package}"
+            kmod-wireguard
+            wireguard-tools
+            luci-proto-wireguard
+            kmod-tun
+            tailscale
+            miniupnpd-nftables
+            luci-app-upnp
+            lucky
+            luci-app-lucky
+            pbr
+            luci-app-pbr
+            dnsmasq-full
+            ppp
+            ppp-mod-pppoe
+            luci-proto-ppp
+          )
+
+          for package in "${REQUIRED_PACKAGES[@]}"; do
+            if ! grep -q "^CONFIG_PACKAGE_${package}=y$" .config; then
+              echo "ERROR: Required package missing: ${package}"
               exit 1
             fi
+            echo "OK: ${package}"
           done
 
-          echo "All required packages selected."
+          echo "===== Checking PPPoE Support ====="
 
-          echo "========== DAE check =========="
+          grep -q '^CONFIG_PACKAGE_ppp=y$' .config
+          grep -q '^CONFIG_PACKAGE_ppp-mod-pppoe=y$' .config
+          grep -q '^CONFIG_PACKAGE_luci-proto-ppp=y$' .config
 
-          if grep -q '^CONFIG_PACKAGE_dae=y' .config; then
-            echo "ERROR: DAE should be installed independently."
+          echo "PPPoE support enabled."
+          echo "No PPPoE credentials are preconfigured."
+
+          echo "===== Checking DAE ====="
+
+          if grep -q '^CONFIG_PACKAGE_dae=y$' .config; then
+            echo "ERROR: DAE must not be built into firmware."
             exit 1
           fi
 
-          echo "DAE is not built into firmware."
+          echo "DAE is not integrated into firmware."
+          echo "DAE will be installed and maintained independently."
 
-      # ---------------------------------------------------
-      # 8. Download sources
-      # ---------------------------------------------------
+          echo "===== Configuration Verification Passed ====="
 
-      - name: Download sources
-        working-directory: openwrt
+      # =====================================================
+      # 9. 下载编译所需源码包
+      # =====================================================
+      - name: Download Package Sources
         run: |
+          cd openwrt
+
           make download -j8
 
-      # ---------------------------------------------------
-      # 9. Compile firmware
-      # ---------------------------------------------------
-
-      - name: Build firmware
-        working-directory: openwrt
+      # =====================================================
+      # 10. 编译固件
+      # =====================================================
+      - name: Compile Firmware
         run: |
+          cd openwrt
+
+          export FORCE_UNSAFE_CONFIGURE=1
+
+          echo "===== Build Environment ====="
+          echo "CPU Cores: $(nproc)"
+          free -h
+
+          echo "===== Start Compilation ====="
+
           make -j"$(nproc)" V=s
 
-      # ---------------------------------------------------
-      # 10. Collect firmware
-      # ---------------------------------------------------
-
-      - name: Collect firmware
+      # =====================================================
+      # 11. 整理固件文件
+      # =====================================================
+      - name: Collect Firmware Files
         run: |
-          mkdir -p release
+          set -e
 
-          find openwrt/bin/targets/mediatek/filogic \
-            -type f \
+          cd openwrt
+
+          BUILD_DIR="bin/targets/mediatek/filogic"
+          RELEASE_DIR="../release"
+
+          mkdir -p "${RELEASE_DIR}"
+
+          echo "===== Available Build Files ====="
+          ls -lh "${BUILD_DIR}"
+
+          # 收集 AX6000 U-Boot Mod 关键文件
+          find "${BUILD_DIR}" -maxdepth 1 -type f \
             \( \
               -name '*ubootmod-preloader.bin' \
               -o -name '*ubootmod-bl31-uboot.fip' \
@@ -192,15 +247,13 @@ jobs:
               -o -name '*ubootmod-initramfs-recovery.itb' \
               -o -name '*ubootmod-squashfs-sysupgrade.itb' \
             \) \
-            -exec cp -v {} release/ \;
+            -exec cp -v {} "${RELEASE_DIR}/" \;
 
-          echo "========== Collected files =========="
+          echo "===== Collected Files ====="
+          ls -lh "${RELEASE_DIR}"
 
-          ls -lh release
-
-          # Check all required artifacts
-
-          required_files=(
+          # 检查关键文件是否齐全
+          REQUIRED_PATTERNS=(
             '*ubootmod-preloader.bin'
             '*ubootmod-bl31-uboot.fip'
             '*ubootmod-initramfs-factory.ubi'
@@ -208,43 +261,105 @@ jobs:
             '*ubootmod-squashfs-sysupgrade.itb'
           )
 
-          for pattern in "${required_files[@]}"; do
-            if ! compgen -G "release/${pattern}" > /dev/null; then
-              echo "ERROR: Missing artifact: ${pattern}"
+          for pattern in "${REQUIRED_PATTERNS[@]}"; do
+            if ! compgen -G "${RELEASE_DIR}/${pattern}" > /dev/null; then
+              echo "ERROR: Missing firmware file: ${pattern}"
               exit 1
             fi
           done
 
-          echo "All required firmware artifacts found."
+          echo "All required firmware files collected."
 
-      # ---------------------------------------------------
-      # 11. Build information and SHA256
-      # ---------------------------------------------------
-
-      - name: Generate build information
+      # =====================================================
+      # 12. 生成编译信息和 SHA256
+      # =====================================================
+      - name: Generate Build Information
         run: |
-          {
-            echo "Device: Redmi AX6000 U-Boot Mod"
-            echo "Target: mediatek/filogic"
-            echo "Source: OpenWrt"
-            echo "Version: ${OPENWRT_TAG}"
-            echo "Build date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-            echo ""
-            echo "Packages:"
-            grep '^CONFIG_PACKAGE_.*=y' openwrt/.config | sort
-          } > release/BUILD_INFO.txt
+          cd openwrt
 
-          cd release
+          RELEASE_DIR="../release"
+
+          cat > "${RELEASE_DIR}/BUILD_INFO.txt" <<EOF
+          =====================================================
+          Redmi AX6000 U-Boot Mod Firmware
+          =====================================================
+
+          Firmware Source:
+          ${OPENWRT_REPO}
+
+          OpenWrt Version:
+          ${OPENWRT_TAG}
+
+          Target:
+          mediatek/filogic
+
+          Device:
+          xiaomi_redmi-router-ax6000-ubootmod
+
+          Build Date:
+          $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+
+          Build Number:
+          ${GITHUB_RUN_NUMBER}
+
+          =====================================================
+          Included Features
+          =====================================================
+
+          LuCI Web Interface
+          HTTPS Support
+          Simplified Chinese
+          Argon Theme
+
+          WireGuard
+          Tailscale
+          UPnP
+          PPPoE Support
+          Lucky
+          PBR
+          dnsmasq-full with nftset
+
+          Network Diagnostics Tools
+
+          =====================================================
+          Important Notes
+          =====================================================
+
+          PPPoE:
+          Supported.
+          No PPPoE username or password preconfigured.
+
+          Wi-Fi:
+          No custom SSID or password preconfigured.
+
+          Root Password:
+          No custom root password preconfigured.
+
+          DAE:
+          Not integrated into firmware.
+          Install and update independently.
+
+          CPU:
+          Default device CPU frequency management.
+          No overclocking or forced maximum frequency.
+
+          =====================================================
+          EOF
+
+          cd "${RELEASE_DIR}"
 
           sha256sum * > SHA256SUMS
 
+          echo "===== Release Files ====="
+          ls -lh
+
+          echo "===== SHA256SUMS ====="
           cat SHA256SUMS
 
-      # ---------------------------------------------------
-      # 12. Upload artifact
-      # ---------------------------------------------------
-
-      - name: Upload build artifacts
+      # =====================================================
+      # 13. 上传 GitHub Actions 编译产物
+      # =====================================================
+      - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: Redmi-AX6000-OpenWrt-${{ env.OPENWRT_TAG }}
@@ -252,43 +367,63 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # ---------------------------------------------------
-      # 13. Create GitHub Release
-      # ---------------------------------------------------
-
-      - name: Create Release
+      # =====================================================
+      # 14. 发布 GitHub Release
+      # =====================================================
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: AX6000-${{ env.OPENWRT_TAG }}-${{ github.run_number }}
           name: Redmi AX6000 OpenWrt ${{ env.OPENWRT_TAG }} Build ${{ github.run_number }}
+
           body: |
-            ## Redmi AX6000 U-Boot Mod
+            # Redmi AX6000 U-Boot Mod Firmware
 
-            - Firmware: Official OpenWrt
-            - Version: ${{ env.OPENWRT_TAG }}
-            - Target: MediaTek Filogic
-            - Device: Xiaomi Redmi Router AX6000 U-Boot Mod
+            Official OpenWrt source:
+            `${{ env.OPENWRT_TAG }}`
 
-            ### Included
+            ## Device
 
+            - Redmi AX6000
+            - U-Boot Mod
+            - MediaTek Filogic
+
+            ## Included Features
+
+            - LuCI Web Interface
+            - HTTPS
+            - Simplified Chinese
+            - Argon Theme
             - WireGuard
             - Tailscale
             - UPnP
+            - PPPoE
             - Lucky
-            - Argon Theme
-            - Chinese LuCI
+            - PBR
+            - dnsmasq-full with nftset
+            - Network Diagnostic Tools
 
-            ### Independent installation
+            ## Important Notes
 
-            DAE is not compiled into the firmware.
-            It is maintained and updated independently.
+            - PPPoE is supported.
+            - No PPPoE credentials are preconfigured.
+            - No custom Wi-Fi SSID or password is preconfigured.
+            - No custom root password is preconfigured.
+            - DAE is not integrated; install and update it independently.
+            - Default CPU frequency management is retained.
+            - No CPU overclocking or forced maximum frequency.
 
-            ### Notes
+            ## Build Information
 
-            PPPoE credentials and Wi-Fi passwords are not preconfigured.
-            Root password must be configured after installation.
+            - OpenWrt: `${{ env.OPENWRT_TAG }}`
+            - Build number: `${{ github.run_number }}`
+            - Commit: `${{ github.sha }}`
+
+            See `BUILD_INFO.txt` and `SHA256SUMS` for details.
 
           files: release/*
           fail_on_unmatched_files: true
+          generate_release_notes: false
+
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
