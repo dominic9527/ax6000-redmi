@@ -1,117 +1,96 @@
-#!/bin/bash
 
-# =========================================================
-# DIY Part 1
-# Redmi AX6000 / OpenWrt 25.12.6
-#
-# Third-party packages and DAE APK signing key
-# =========================================================
-
+#!/usr/bin/env bash
 set -Eeuo pipefail
-
-# ---------------------------------------------------------
-# 0. Check OpenWrt source directory
-# ---------------------------------------------------------
-
-if [ ! -f include/kernel.mk ]; then
-    echo "ERROR: Please run this script from OpenWrt source root."
-    exit 1
-fi
 
 echo "========================================"
 echo "DIY Part 1: Third-party packages"
 echo "========================================"
 
-mkdir -p package
-mkdir -p files/etc/apk/keys
+if [[ ! -f "include/toplevel.mk" ]]; then
+    echo "ERROR: OpenWrt source root not found."
+    exit 1
+fi
 
-# ---------------------------------------------------------
 # 1. Lucky
-# ---------------------------------------------------------
+echo "[1/3] Cloning Lucky..."
 
-if [ ! -d package/lucky ]; then
+LUCKY_DIR="package/lucky"
 
-    echo "[1/3] Cloning Lucky..."
+rm -rf "${LUCKY_DIR}"
 
-    git clone --depth 1 \
-        https://github.com/gdy666/luci-app-lucky.git \
-        package/lucky
+git clone --depth 1 \
+    https://github.com/gdy666/luci-app-lucky.git \
+    "${LUCKY_DIR}"
 
-else
+echo "===== Lucky repository information ====="
+git -C "${LUCKY_DIR}" log -1 --oneline
+find "${LUCKY_DIR}" -maxdepth 3 -name Makefile -print
 
-    echo "[1/3] Lucky already exists, skipping."
+LUCKY_CORE="${LUCKY_DIR}/lucky/Makefile"
+LUCKY_LUCI="${LUCKY_DIR}/luci-app-lucky/Makefile"
 
+if [[ ! -f "${LUCKY_CORE}" || ! -f "${LUCKY_LUCI}" ]]; then
+    echo "ERROR: Lucky repository structure is unexpected."
+    echo "Expected files:"
+    echo "  ${LUCKY_CORE}"
+    echo "  ${LUCKY_LUCI}"
+    echo "Actual Makefiles:"
+    find "${LUCKY_DIR}" -maxdepth 4 -name Makefile -print
+    exit 1
 fi
 
-# ---------------------------------------------------------
-# 2. Argon Theme
-# ---------------------------------------------------------
+echo "Lucky core and LuCI Makefiles verified."
 
-if [ ! -d package/luci-theme-argon ]; then
+# 2. Argon
+echo "[2/3] Cloning Argon Theme..."
 
-    echo "[2/3] Cloning Argon Theme..."
+ARGON_DIR="package/luci-theme-argon"
 
-    git clone --depth 1 \
-        https://github.com/jerrykuku/luci-theme-argon.git \
-        package/luci-theme-argon
+rm -rf "${ARGON_DIR}"
 
-else
+git clone --depth 1 \
+    https://github.com/jerrykuku/luci-theme-argon.git \
+    "${ARGON_DIR}"
 
-    echo "[2/3] Argon already exists, skipping."
-
+if [[ ! -f "${ARGON_DIR}/Makefile" ]]; then
+    echo "ERROR: Argon Theme Makefile not found."
+    find "${ARGON_DIR}" -maxdepth 3 -name Makefile -print
+    exit 1
 fi
 
-# ---------------------------------------------------------
-# 3. DAE APK public signing key
-#
-# DAE remains independently installed.
-# ---------------------------------------------------------
+echo "Argon Theme verified."
 
+# 3. DAE APK public key
 echo "[3/3] Downloading DAE APK public key..."
 
-DAE_KEY="files/etc/apk/keys/daeuniverse.pem"
-DAE_TMP="${DAE_KEY}.tmp"
+DAE_KEY_DIR="files/etc/apk/keys"
+DAE_KEY_FILE="${DAE_KEY_DIR}/daeuniverse.pem"
 
-rm -f "$DAE_TMP"
+mkdir -p "${DAE_KEY_DIR}"
 
-if ! wget -q \
-    --tries=3 \
-    --timeout=30 \
-    -O "$DAE_TMP" \
-    https://openwrt.daeuniverse.org/public-key.pem; then
+curl -fL \
+    --retry 3 \
+    --retry-delay 2 \
+    --connect-timeout 20 \
+    https://openwrt.daeuniverse.org/public-key.pem \
+    -o "${DAE_KEY_FILE}.tmp"
 
-    rm -f "$DAE_TMP"
+test -s "${DAE_KEY_FILE}.tmp"
 
-    echo "ERROR: Failed to download DAE public key."
-    exit 1
-fi
-
-if [ ! -s "$DAE_TMP" ]; then
-
-    rm -f "$DAE_TMP"
-
-    echo "ERROR: DAE public key is empty."
-    exit 1
-fi
-
-mv "$DAE_TMP" "$DAE_KEY"
+mv "${DAE_KEY_FILE}.tmp" "${DAE_KEY_FILE}"
 
 echo "DAE public key installed successfully."
 
-# ---------------------------------------------------------
-# 4. Verify package directories
-# ---------------------------------------------------------
-
-if [ ! -f package/lucky/Makefile ]; then
-    echo "ERROR: Lucky package Makefile not found."
-    exit 1
-fi
-
-if [ ! -f package/luci-theme-argon/Makefile ]; then
-    echo "ERROR: Argon package Makefile not found."
-    exit 1
-fi
-
+# Final verification
 echo "========================================"
 echo "DIY Part 1 completed successfully."
 echo "========================================"
+
+echo "Lucky:"
+ls -l "${LUCKY_CORE}" "${LUCKY_LUCI}"
+
+echo "Argon:"
+ls -l "${ARGON_DIR}/Makefile"
+
+echo "DAE key:"
+ls -lh "${DAE_KEY_FILE}"
