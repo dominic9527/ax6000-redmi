@@ -147,7 +147,6 @@ jobs:
           REQUIRED_PACKAGES=(
             luci
             luci-ssl
-            luci-i18n-base-zh-cn
             luci-theme-argon
             kmod-wireguard
             wireguard-tools
