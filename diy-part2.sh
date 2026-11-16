@@ -50,7 +50,7 @@ uci set system.@system[0].timezone='CST-8'
 # 2. LAN address
 # ---------------------------------------------------------
 
-uci set network.lan.ipaddr='192.168.1.254'
+uci set network.lan.ipaddr='192.168.2.254'
 
 # ---------------------------------------------------------
 # 3. LuCI language and theme
